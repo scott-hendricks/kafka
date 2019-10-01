@@ -21,12 +21,16 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.node.TextNode;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.utils.ThreadUtils;
@@ -46,8 +50,10 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -84,13 +90,30 @@ public class ProduceBenchWorker implements TaskWorker {
             throw new IllegalStateException("ProducerBenchWorker is already running.");
         }
         log.info("{}: Activating ProduceBenchWorker with {}", id, spec);
-        // Create an executor with 2 threads.  We need the second thread so
-        // that the StatusUpdater can run in parallel with SendRecords.
-        this.executor = Executors.newScheduledThreadPool(2,
+        // Create an executor with 3 threads.  We need the second thread so
+        // that the StatusUpdater can run in parallel with SendRecords, and
+        // the third thread is for refreshing the partition info, if desired.
+        this.executor = Executors.newScheduledThreadPool(3,
             ThreadUtils.createThreadFactory("ProduceBenchWorkerThread%d", false));
         this.status = status;
         this.doneFuture = doneFuture;
         executor.submit(new Prepare());
+    }
+
+    private HashSet<TopicPartition> getActivePartitions() throws InterruptedException, ExecutionException {
+        Set<String> topics = spec.activeTopics().materialize().keySet();
+        Properties props = new Properties();
+        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, this.spec.bootstrapServers());
+        WorkerUtils.addConfigsToProperties(props, this.spec.commonClientConf(), this.spec.commonClientConf());
+        HashSet<TopicPartition> active = new HashSet<>();
+        AdminClient client = AdminClient.create(props);
+        Map<String, TopicDescription> topicDetails = client.describeTopics(spec.activeTopics().get().keySet()).all().get();
+        for (String topic : topics) {
+            for (TopicPartitionInfo tpi : topicDetails.get(topic).partitions()) {
+                active.add(new TopicPartition(topic, tpi.partition()));
+            }
+        }
+        return active;
     }
 
     public class Prepare implements Runnable {
@@ -171,7 +194,6 @@ public class ProduceBenchWorker implements TaskWorker {
     }
 
     public class SendRecords implements Callable<Void> {
-        private final HashSet<TopicPartition> activePartitions;
 
         private final Histogram histogram;
 
@@ -187,6 +209,7 @@ public class ProduceBenchWorker implements TaskWorker {
 
         private final Throttle throttle;
 
+        private HashSet<TopicPartition> activePartitions;
         private Iterator<TopicPartition> partitionsIterator;
         private Future<RecordMetadata> sendFuture;
         private AtomicLong transactionsCommitted;
@@ -205,6 +228,11 @@ public class ProduceBenchWorker implements TaskWorker {
             this.statusUpdaterFuture = executor.scheduleWithFixedDelay(
                 new StatusUpdater(histogram, transactionsCommitted), 30, 30, TimeUnit.SECONDS);
 
+            if (spec.partitionRefreshRateMs() > 0) {
+                executor.scheduleAtFixedRate(
+                        new PartitionRefresher(), spec.partitionRefreshRateMs(), spec.partitionRefreshRateMs(),
+                        TimeUnit.MILLISECONDS);
+            }
             Properties props = new Properties();
             props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, spec.bootstrapServers());
             if (enableTransactions)
@@ -218,6 +246,19 @@ public class ProduceBenchWorker implements TaskWorker {
                 this.throttle = new Throttle(perPeriod, THROTTLE_PERIOD_MS);
             } else {
                 this.throttle = new SendRecordsThrottle(perPeriod, producer);
+            }
+        }
+
+        public class PartitionRefresher implements Runnable {
+            @Override
+            public void run() {
+                try {
+                    HashSet<TopicPartition> active = ProduceBenchWorker.this.getActivePartitions();
+                    SendRecords.this.activePartitions = active;
+                    SendRecords.this.partitionsIterator = SendRecords.this.activePartitions.iterator();
+                } catch (Exception e) {
+                    log.error("Exception on partition refresh, partitions not updated.", e);
+                }
             }
         }
 
