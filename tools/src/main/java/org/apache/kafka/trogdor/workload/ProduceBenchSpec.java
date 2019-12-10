@@ -34,7 +34,8 @@ import java.util.Optional;
  * Said generator works in lockstep with the producer by instructing it what action to take next in regards to a transaction.
  *
  * You can also have the test refresh the partition list of the active topics at an interval by setting the
- * `partitionRefreshRateMs` parameter to a positive number.  This is useful if you are adding partitions to the topics.
+ * `partitionRefreshRateMs` parameter to a positive number.  This way the producer will produce to all partitions following
+ * a refresh, even if you are adding partitions to the topics.
  *
  * An example JSON representation which will result in a producer that creates three topics (foo1, foo2, foo3)
  * with three partitions each and produces to them:

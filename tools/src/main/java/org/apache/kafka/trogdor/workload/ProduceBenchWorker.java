@@ -90,11 +90,16 @@ public class ProduceBenchWorker implements TaskWorker {
             throw new IllegalStateException("ProducerBenchWorker is already running.");
         }
         log.info("{}: Activating ProduceBenchWorker with {}", id, spec);
-        // Create an executor with 3 threads.  We need the second thread so
+        // Create an executor with at least 2 threads.  We need the second thread so
         // that the StatusUpdater can run in parallel with SendRecords, and
         // the third thread is for refreshing the partition info, if desired.
-        this.executor = Executors.newScheduledThreadPool(3,
-            ThreadUtils.createThreadFactory("ProduceBenchWorkerThread%d", false));
+        if (spec.partitionRefreshRateMs() > 0) {
+            this.executor = Executors.newScheduledThreadPool(3,
+                    ThreadUtils.createThreadFactory("ProduceBenchWorkerThread%d", false));
+        } else {
+            this.executor = Executors.newScheduledThreadPool(2,
+                    ThreadUtils.createThreadFactory("ProduceBenchWorkerThread%d", false));
+        }
         this.status = status;
         this.doneFuture = doneFuture;
         executor.submit(new Prepare());
