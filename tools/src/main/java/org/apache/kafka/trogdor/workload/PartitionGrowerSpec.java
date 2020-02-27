@@ -40,7 +40,6 @@ import java.util.Map;
  *    "bootstrapServers": "localhost:9092",
  *    "growPartitions": 9,
  *    "growthIntervalMs": 600000,
- *    "initialDelayMs": 0,
  *    "topicName": "test-topic1"
  *   }
  *  }
@@ -53,7 +52,6 @@ public class PartitionGrowerSpec extends TaskSpec {
     private final Map<String, String> commonClientConf;
     private final int growPartitions;
     private final long growthIntervalMs;
-    private final long initialDelayMs;
     private final String topicName;
 
     @JsonCreator
@@ -66,7 +64,6 @@ public class PartitionGrowerSpec extends TaskSpec {
             @JsonProperty("commonClientConf") Map<String, String> commonClientConf,
             @JsonProperty("growPartitions") int growPartitions,
             @JsonProperty("growthIntervalMs") long growthIntervalMs,
-            @JsonProperty("initialDelayMs") long initialDelayMs,
             @JsonProperty("topicName") String topicName) {
         super(startMs, durationMs);
         this.clientNode = clientNode == null ? "" : clientNode;
@@ -75,7 +72,6 @@ public class PartitionGrowerSpec extends TaskSpec {
         this.commonClientConf = configOrEmptyMap(commonClientConf);
         this.growPartitions = growPartitions;
         this.growthIntervalMs = growthIntervalMs;
-        this.initialDelayMs = initialDelayMs;
         this.topicName = topicName;
     }
 
@@ -107,11 +103,6 @@ public class PartitionGrowerSpec extends TaskSpec {
     @JsonProperty
     public long growthIntervalMs() {
         return growthIntervalMs;
-    }
-
-    @JsonProperty
-    public long initialDelayMs() {
-        return initialDelayMs;
     }
 
     @JsonProperty

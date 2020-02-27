@@ -29,7 +29,7 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.trogdor.common.JsonUtil;
 import org.apache.kafka.trogdor.common.Platform;
-import org.apache.kafka.trogdor.common.ThreadUtils;
+import org.apache.kafka.common.utils.ThreadUtils;
 import org.apache.kafka.trogdor.common.WorkerUtils;
 import org.apache.kafka.trogdor.task.TaskWorker;
 import org.apache.kafka.trogdor.task.WorkerStatusTracker;
@@ -95,10 +95,8 @@ public class PartitionGrowerWorker implements TaskWorker {
             ThreadUtils.createThreadFactory("WorkerThread%d", false));
         this.statusUpdaterFuture = this.executor.scheduleAtFixedRate(
             new StatusUpdater(), 0, REPORT_INTERVAL_MS, TimeUnit.MILLISECONDS);
-
         this.executor.scheduleAtFixedRate(
-            new AddPartitionsToExistingTopic(), this.spec.initialDelayMs(), this.spec.growthIntervalMs(),
-            TimeUnit.MILLISECONDS);
+            new AddPartitionsToExistingTopic(), 0, this.spec.growthIntervalMs(), TimeUnit.MILLISECONDS);
     }
 
     public class AddPartitionsToExistingTopic implements Runnable {

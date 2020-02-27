@@ -21,7 +21,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.node.TextNode;
 import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.clients.producer.Callback;
@@ -63,7 +63,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class ProduceBenchWorker implements TaskWorker {
     private static final Logger log = LoggerFactory.getLogger(ProduceBenchWorker.class);
-    
+
     private static final int THROTTLE_PERIOD_MS = 100;
 
     private final String id;
@@ -111,13 +111,14 @@ public class ProduceBenchWorker implements TaskWorker {
         props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, this.spec.bootstrapServers());
         WorkerUtils.addConfigsToProperties(props, this.spec.commonClientConf(), this.spec.commonClientConf());
         HashSet<TopicPartition> active = new HashSet<>();
-        AdminClient client = AdminClient.create(props);
+        Admin client = Admin.create(props);
         Map<String, TopicDescription> topicDetails = client.describeTopics(spec.activeTopics().get().keySet()).all().get();
         for (String topic : topics) {
             for (TopicPartitionInfo tpi : topicDetails.get(topic).partitions()) {
                 active.add(new TopicPartition(topic, tpi.partition()));
             }
         }
+        client.close();
         return active;
     }
 
@@ -147,7 +148,7 @@ public class ProduceBenchWorker implements TaskWorker {
                 }
                 status.update(new TextNode("Creating " + newTopics.keySet().size() + " topic(s)"));
                 WorkerUtils.createTopics(log, spec.bootstrapServers(), spec.commonClientConf(),
-                                         spec.adminClientConf(), newTopics, false);
+                        spec.adminClientConf(), newTopics, false);
                 status.update(new TextNode("Created " + newTopics.keySet().size() + " topic(s)"));
                 executor.submit(new SendRecords(active));
             } catch (Throwable e) {
@@ -218,6 +219,7 @@ public class ProduceBenchWorker implements TaskWorker {
         private Iterator<TopicPartition> partitionsIterator;
         private Future<RecordMetadata> sendFuture;
         private AtomicLong transactionsCommitted;
+        private AtomicLong partitionCount;
         private boolean enableTransactions;
 
         SendRecords(HashSet<TopicPartition> activePartitions) {
@@ -228,10 +230,11 @@ public class ProduceBenchWorker implements TaskWorker {
             this.transactionGenerator = spec.transactionGenerator();
             this.enableTransactions = this.transactionGenerator.isPresent();
             this.transactionsCommitted = new AtomicLong();
+            this.partitionCount = new AtomicLong(activePartitions.size());
 
             int perPeriod = WorkerUtils.perSecToPerPeriod(spec.targetMessagesPerSec(), THROTTLE_PERIOD_MS);
             this.statusUpdaterFuture = executor.scheduleWithFixedDelay(
-                new StatusUpdater(histogram, transactionsCommitted), 30, 30, TimeUnit.SECONDS);
+                new StatusUpdater(histogram, transactionsCommitted, partitionCount), 30, 30, TimeUnit.SECONDS);
 
             if (spec.partitionRefreshRateMs() > 0) {
                 executor.scheduleAtFixedRate(
@@ -261,6 +264,7 @@ public class ProduceBenchWorker implements TaskWorker {
                     HashSet<TopicPartition> active = ProduceBenchWorker.this.getActivePartitions();
                     SendRecords.this.activePartitions = active;
                     SendRecords.this.partitionsIterator = SendRecords.this.activePartitions.iterator();
+                    SendRecords.this.partitionCount.set(active.size());
                 } catch (Exception e) {
                     log.error("Exception on partition refresh, partitions not updated.", e);
                 }
@@ -305,7 +309,7 @@ public class ProduceBenchWorker implements TaskWorker {
                 WorkerUtils.abort(log, "SendRecords", e, doneFuture);
             } finally {
                 statusUpdaterFuture.cancel(false);
-                StatusData statusData = new StatusUpdater(histogram, transactionsCommitted).update();
+                StatusData statusData = new StatusUpdater(histogram, transactionsCommitted, partitionCount).update();
                 long curTimeMs = Time.SYSTEM.milliseconds();
                 log.info("Sent {} total record(s) in {} ms.  status: {}",
                     histogram.summarize().numSamples(), curTimeMs - startTimeMs, statusData);
@@ -364,10 +368,12 @@ public class ProduceBenchWorker implements TaskWorker {
     public class StatusUpdater implements Runnable {
         private final Histogram histogram;
         private final AtomicLong transactionsCommitted;
+        private final AtomicLong partitionCount;
 
-        StatusUpdater(Histogram histogram, AtomicLong transactionsCommitted) {
+        StatusUpdater(Histogram histogram, AtomicLong transactionsCommitted, AtomicLong partitionCount) {
             this.histogram = histogram;
             this.transactionsCommitted = transactionsCommitted;
+            this.partitionCount = partitionCount;
         }
 
         @Override
@@ -385,7 +391,8 @@ public class ProduceBenchWorker implements TaskWorker {
                 summary.percentiles().get(0).value(),
                 summary.percentiles().get(1).value(),
                 summary.percentiles().get(2).value(),
-                transactionsCommitted.get());
+                transactionsCommitted.get(),
+                partitionCount.get());
             status.update(JsonUtil.JSON_SERDE.valueToTree(statusData));
             return statusData;
         }
@@ -398,6 +405,7 @@ public class ProduceBenchWorker implements TaskWorker {
         private final int p95LatencyMs;
         private final int p99LatencyMs;
         private final long transactionsCommitted;
+        private final long partitionCount;
 
         /**
          * The percentiles to use when calculating the histogram data.
@@ -411,13 +419,15 @@ public class ProduceBenchWorker implements TaskWorker {
                    @JsonProperty("p50LatencyMs") int p50latencyMs,
                    @JsonProperty("p95LatencyMs") int p95latencyMs,
                    @JsonProperty("p99LatencyMs") int p99latencyMs,
-                   @JsonProperty("transactionsCommitted") long transactionsCommitted) {
+                   @JsonProperty("transactionsCommitted") long transactionsCommitted,
+                   @JsonProperty("partitionCount") long partitionCount) {
             this.totalSent = totalSent;
             this.averageLatencyMs = averageLatencyMs;
             this.p50LatencyMs = p50latencyMs;
             this.p95LatencyMs = p95latencyMs;
             this.p99LatencyMs = p99latencyMs;
             this.transactionsCommitted = transactionsCommitted;
+            this.partitionCount = partitionCount;
         }
 
         @JsonProperty
@@ -448,6 +458,11 @@ public class ProduceBenchWorker implements TaskWorker {
         @JsonProperty
         public int p99LatencyMs() {
             return p99LatencyMs;
+        }
+
+        @JsonProperty
+        public long partitionCount() {
+            return partitionCount;
         }
     }
 
